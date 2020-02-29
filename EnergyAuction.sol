@@ -1,6 +1,28 @@
 pragma solidity >=0.4.22 <0.6.0;
 
 contract EnergyAuction{
+    enum State {Offline, Online}
+    State private state = State.Offline;
+    address oracle;
+    uint energyAvailable = 0;
+    uint energySold=0;
+    
+    
+    modifier onlyOracle(){
+        require(msg.sender == oracle);
+        _;
+    }
+    
+    function oracleStartBid (uint _energyAvailable) public onlyOracle {
+        require(!contractEnded,"the contract is ended");
+        state= State.Online;
+        energyAvailable = _energyAvailable;
+    }
+    
+    
+    function isOnline () private view returns(bool){
+        return (state == State.Online);
+    }
     
     // init contract
     uint power;
@@ -11,7 +33,7 @@ contract EnergyAuction{
     uint public biddingTime;
     uint private auctionEndTime;
     address private highestBidder;
-    uint private highestBid;
+    uint public highestBid;
     mapping(address => uint) pendingReturns;
     bool private auctionEnded=false;
     bool private canStartBids=false;
@@ -23,30 +45,38 @@ contract EnergyAuction{
     bool private sellerPayed=false;
     bool private eneryDelivered=false;
     bool private sellChecked=false;
+    bool private sellValid=false;
     mapping(address => uint) public powerTrack;
     
     constructor(
         uint _biddingTime,
-        address _seller,
-        uint _power
+        uint _power,
+        address _oracle
     ) public {
-        seller = _seller;
+        seller = msg.sender;
         biddingTime = _biddingTime;
         power=_power;
         powerTrack[seller]=power;
+        oracle = _oracle;
+        state = State.Offline;
     }
     
     //Auction
     function launchAuction() public  {
+        require(!contractEnded,"the contract is ended");
         require(msg.sender==seller,"you are not the seller");
         require(!auctionEnded,"the auction is finished");
+        require(isOnline(),'cannot start the auction for now');
         require(!canStartBids,"the auction is already on");
+        require(power <= energyAvailable , "you don't have enough energy");
         auctionEndTime = now + biddingTime;
         canStartBids=true;
      }
      
 
     function bid() public payable {
+         require(!contractEnded,"the contract is ended");
+
         require(
             canStartBids,"The auction is not opened yet."
             );
@@ -103,14 +133,65 @@ contract EnergyAuction{
         auctionEnded = true;
         emit AuctionEnded(highestBidder, highestBid);
 
-        
     }
     
     //sell
-    function sell() public returns (bool) {
-        require(auctionEnded, "the auction has not yet ended");
-        require(!sellerPayed, "you have already been payed");
+   
+     function deliver() public{
+        require(!contractEnded,"the contract is ended");
         require(msg.sender==seller, "you are not the seller");
+        require(auctionEnded, "the auction has not yet ended");
+        require(!eneryDelivered, "you have already been delivered");
+        uint amount=power;
+        
+         if (amount > 0) {
+             
+            power=0;
+            powerTrack[highestBidder] = powerTrack[highestBidder]+amount; 
+            powerTrack[seller]=powerTrack[seller]-amount;
+            eneryDelivered=true;
+            power=amount;
+        }  
+    }
+    
+
+    
+    function oracleCheck (uint _energySold) public onlyOracle {
+        require(!contractEnded,"the contract is not ended");
+        require(eneryDelivered, "energy hasn't been delivered yet");
+        require(!sellChecked, "already checked");
+        energySold=_energySold;
+        check();
+    }
+        
+    function check() private {
+        
+        
+        if(powerTrack[highestBidder]==energySold&&powerTrack[seller]==0){
+            sellValid=true;
+        }
+        else{
+            uint amount=energySold;
+        
+                if (amount > 0) {
+             
+                energySold=0;
+                powerTrack[highestBidder] = powerTrack[highestBidder]-amount; 
+                powerTrack[seller]=powerTrack[seller]+amount;
+                energySold=amount;
+                }  
+                pendingReturns[highestBidder] += highestBid; 
+            }
+        sellChecked=true;
+       
+        
+    }
+    
+     function sell() public returns (bool) {
+        require(!contractEnded,"the contract is ended");
+        require(msg.sender==seller, "you are not the seller");
+        require(sellValid, "the delivery is not valid");
+        require(!sellerPayed, "you have already been payed");
        
        uint amount=highestBid;
         
@@ -129,69 +210,15 @@ contract EnergyAuction{
             }
             sellerPayed=true;
             }
-            delivery();
              return true;
     }
     
-     function delivery() private{
-        require(!eneryDelivered, "you have already been delivered");
-        require(sellerPayed, "the energy has not been payed yet");
-        uint amount=power;
-        
-         if (amount > 0) {
-             
-            power=0;
-            powerTrack[highestBidder] = powerTrack[highestBidder]+amount; 
-            powerTrack[seller]=powerTrack[seller]-amount;
-            eneryDelivered=true;
-            power=amount;
-        }  
-        check();
-    }
-    
-    function check() private {
-        require(eneryDelivered, "energy hasn't been delivered yet");
-        require(!sellChecked, "already checked");
-        if(powerTrack[highestBidder]==power){
-            sellChecked=true;
-            //log0(bytes32("the sell is checked"));
-        }
-        /*else{
-            
-            uint amount_power=power;
-            if (amount_power > 0) {
-             
-                power=0;
-                powerTrack[highestBidder] = 0; 
-                powerTrack[seller]+=amount_power;
-        }   
-            uint amount_bid=highestBid;
-            if (amount_bid > 0) {
-             //à revoir
-                highestBid=0;
-                //seller.send(amount_bid);
-                //highestBidder.send(-amount_bid);
-            }   
-            sellChecked=true;
-             highestBid=amount_bid;
-             power=amount_power;
-            
-            
-            
-        }*/
-        else{
-            log0(bytes32("sell not valid"));
-        
-        }
-    }
-    
         function contractEnd() public {
+            require(!contractEnded,"the contract is not ended");
+            require(sellChecked||(power > energyAvailable),"the sell is not valid");
             require(msg.sender==seller,"you are not the seller");
-            require(sellChecked,"the sell is not valid");
+            require((sellerPayed&&sellValid)||(!sellValid)||(power > energyAvailable), "you have not payed yet");
             contractEnded=true;
         }
-
-    
-
     
 }
